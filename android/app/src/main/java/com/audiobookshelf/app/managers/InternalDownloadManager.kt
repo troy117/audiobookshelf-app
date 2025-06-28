@@ -20,6 +20,7 @@ class InternalDownloadManager(
 ) : AutoCloseable {
 
   private val tag = "InternalDownloadManager"
+  private val maxEOSCount = 10
   private val client: OkHttpClient =
           OkHttpClient.Builder().connectTimeout(30, TimeUnit.SECONDS).build()
 
@@ -30,7 +31,7 @@ class InternalDownloadManager(
    * @throws IOException If an I/O error occurs.
    */
   @Throws(IOException::class)
-  fun download(url: String) {
+  fun download(url: String, countEOS: Int =0) {
     try {
       val existingSize = getInternalFileSize(fileUri)
       Log.d(tag, "Existing file size: $existingSize bytes")
@@ -60,27 +61,37 @@ class InternalDownloadManager(
                             progressCallback.onComplete(true)
                             return
                           }
+                          try //This try catch block should catch the unexpected end of stream error that happens and ensure download continues
+                          {
+                            response.body?.let { responseBody ->
+                              val totalLength =
+                                (response.header("Content-Length")?.toLongOrNull()
+                                  ?: 0L) + existingSize
+                              val outputStream = getOutputStream(fileUri, existingSize)
 
-                          response.body?.let { responseBody ->
-                            val totalLength =
-                                    (response.header("Content-Length")?.toLongOrNull()
-                                            ?: 0L) + existingSize
-                            val outputStream = getOutputStream(fileUri, existingSize)
-
-                            outputStream?.let {
-                              BinaryFileWriter(it, progressCallback, existingSize).use { writer ->
-                                writer.write(responseBody.byteStream(), totalLength)
+                              outputStream?.let {
+                                BinaryFileWriter(it, progressCallback, existingSize).use { writer ->
+                                  writer.write(responseBody.byteStream(), totalLength)
+                                }
                               }
+                                ?: run {
+                                  Log.e(tag, "Failed to open output stream")
+                                  progressCallback.onComplete(true)
+                                }
                             }
-                                    ?: run {
-                                      Log.e(tag, "Failed to open output stream")
-                                      progressCallback.onComplete(true)
-                                    }
+                              ?: run {
+                                Log.e(tag, "Response doesn't contain a file")
+                                progressCallback.onComplete(true)
+                              }
+                          } catch (e: IOException)
+                          {
+                            Log.e(tag,"IOException, retry attempt ${countEOS+1}:. ${e.message}")
+                            if(countEOS<maxEOSCount)
+                            {
+                              download(url, countEOS+1)
+                            }
+                            else progressCallback.onComplete(true)
                           }
-                                  ?: run {
-                                    Log.e(tag, "Response doesn't contain a file")
-                                    progressCallback.onComplete(true)
-                                  }
                         }
                       }
               )
